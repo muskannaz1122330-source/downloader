@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { assertSafeOutboundUrl } from '../security/antiSsrfGuard.js';
 import { selectOptimalUpstreamUserAgent } from './idmTurboDownloader.js';
 import { AppError } from '../utils/errors.js';
+import { isFixtureMode, serveFixtureMp4 } from './offlineFixtures.js';
 
 function applyContentDispositionHeader(res, downloadFileName) {
   if (!downloadFileName) return;
@@ -74,6 +75,12 @@ export function streamLocalFileWithRange(
 // ============================================================================
 export async function proxyRemoteMediaStream(req, res, { asAttachment = false } = {}) {
   const targetUrl = String(req.query.url || '').trim();
+  if (isFixtureMode()) {
+    const fileName =
+      String(req.query.filename || req.params?.fileHint || '').trim() ||
+      'UltraDownloader_Fixture_Video.mp4';
+    return serveFixtureMp4(req, res, fileName);
+  }
   const parsed = await assertSafeOutboundUrl(targetUrl, { performDnsCheck: true });
   const customReferer = String(req.query.referer || '').trim();
   const requestedFilename = String(
@@ -106,6 +113,12 @@ export async function proxyRemoteMediaStream(req, res, { asAttachment = false } 
   } catch (err) {
     if (err.name === 'AbortError') return;
     throw new AppError(502, 'UPSTREAM_ERROR', `Upstream stream unreachable: ${err.message}`);
+  }
+
+  // A public URL may redirect into a private target. Re-validate the final hop
+  // (and its DNS answer) before piping a single byte back to the client.
+  if (upstream.url && upstream.url !== parsed.toString()) {
+    await assertSafeOutboundUrl(upstream.url, { performDnsCheck: true });
   }
 
   const contentType = upstream.headers.get('content-type') || 'video/mp4';

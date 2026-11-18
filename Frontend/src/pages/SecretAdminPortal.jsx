@@ -28,6 +28,7 @@ import { SeoManagerTab } from '../components/admin/SeoManagerTab';
 import { FinanceLedgerTab } from '../components/admin/FinanceLedgerTab';
 import { SavedVaultTab } from '../components/admin/SavedVaultTab';
 import { OperationsTab } from '../components/admin/OperationsTab';
+import { SourcesHealthTab } from '../components/admin/SourcesHealthTab';
 import { CenterTheaterModal } from '../components/player/CenterTheaterModal';
 
 const ADMIN_NAV = [
@@ -36,7 +37,8 @@ const ADMIN_NAV = [
   { id: 'finance', label: 'Ledger', hint: 'Income & costs', icon: Receipt },
   { id: 'vault', label: 'Video Vault', hint: 'Saved media', icon: HardDrive },
   { id: 'websites', label: 'Websites', hint: 'Multi-project', icon: Layers },
-  { id: 'platforms', label: 'Platforms', hint: '222+ adapters', icon: Sliders },
+  { id: 'platforms', label: 'Platforms', hint: 'Catalogue', icon: Sliders },
+  { id: 'sources', label: 'Sources Health', hint: 'Verified adapters', icon: ShieldCheck },
   { id: 'ads', label: 'Ad Waterfall', hint: 'Monetization', icon: Radio },
   { id: 'cookies', label: 'Cookies', hint: 'Site access', icon: KeyRound },
   { id: 'security', label: 'Security', hint: 'Audit & ban list', icon: ShieldCheck },
@@ -446,6 +448,8 @@ export function SecretAdminPortal() {
                     onDeleteVaultItem={handleDeleteVaultVideo}
                   />
                 )}
+
+                {activeTab === 'sources' && <SourcesHealthTab showToast={showToast} />}
 
                 {['websites', 'platforms', 'ads', 'cookies', 'security'].includes(activeTab) && (
                   <OperationsTab

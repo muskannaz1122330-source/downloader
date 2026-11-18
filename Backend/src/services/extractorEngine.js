@@ -1,11 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Innertube, UniversalCache, Log } from 'youtubei.js';
-import yts from 'yt-search';
+import { isFixtureMode, getFixtureAnalysis, getFixtureSearchResult } from './offlineFixtures.js';
+
 
 Log.setLevel(Log.Level.NONE);
 import { sqlQuery } from '../db/database.js';
 import { AppError } from '../utils/errors.js';
-import { assertSafeOutboundUrl, normalizeCommonMirrorTypos } from '../security/antiSsrfGuard.js';
+import { assertSafeOutboundUrl, validateSafeExternalUrlSync, normalizeCommonMirrorTypos } from '../security/antiSsrfGuard.js';
 import { decryptVaultSecret } from '../security/cryptoVault.js';
 import { PLATFORM_DEFINITIONS, detectPlatformFromUrl } from '../data/platformDefinitions.js';
 import { isTeraboxEcosystemUrl, analyzeTeraboxShareLink } from './teraboxEngine.js';
@@ -25,6 +26,17 @@ import { cachedOrCoalesced, runtimeEnginePreferences } from './trafficEngine.js'
 // ============================================================================
 
 let cachedScClientId = { id: '', expiresAt: 0 };
+let cachedSearchClientPromise = null;
+
+function getSearchInnertubeClient() {
+  if (!cachedSearchClientPromise) {
+    cachedSearchClientPromise = Innertube.create({ cache: new UniversalCache(false) }).catch((err) => {
+      cachedSearchClientPromise = null;
+      throw err;
+    });
+  }
+  return cachedSearchClientPromise;
+}
 
 function extractBalancedJson(source, startIndex) {
   let depth = 0;
@@ -280,7 +292,7 @@ export function extractYoutubeVideoId(rawUrl) {
 }
 
 // ============================================================================
-// 1. LIVE VIDEO & MUSIC KEYWORD SEARCH (PURE JS `yt-search` — ~600ms!)
+// 1. LIVE VIDEO & MUSIC KEYWORD SEARCH (youtubei.js InnerTube, pure JS)
 // ============================================================================
 export async function searchLiveVideos(input, modeArg = 'video', limitArg = 12) {
   const isObj = input && typeof input === 'object';
@@ -293,11 +305,27 @@ export async function searchLiveVideos(input, modeArg = 'video', limitArg = 12) 
     return { items: [], page: 1, hasMore: false };
   }
 
+  if (isFixtureMode()) return getFixtureSearchResult(cleanQuery);
+
   const cacheKey = `search:v10:${mode}:${sort}:${limit}:${cleanQuery.toLowerCase()}`;
   return cachedOrCoalesced(cacheKey, 90000, async () => {
     const effectiveQuery = mode === 'music' ? `${cleanQuery} official audio` : cleanQuery;
-    const result = await yts(effectiveQuery);
-    let videos = Array.isArray(result?.videos) ? [...result.videos] : [];
+    // Live search uses the already-installed youtubei.js InnerTube client.
+    // `yt-search` was removed: it pulled in unmaintained node-fzf/redstar/
+    // minimatch versions with ReDoS advisories (H12).
+    const yt = await getSearchInnertubeClient();
+    const found = await yt.search(effectiveQuery, { type: mode === 'music' ? 'song' : 'video' });
+    const rawVideos = Array.isArray(found?.videos) ? found.videos : [];
+    let videos = rawVideos.map((v) => ({
+      videoId: v.id || v.video_id,
+      title: typeof v.title === 'string' ? v.title : v.title?.text || cleanQuery,
+      url: `https://www.youtube.com/watch?v=${v.id || v.video_id}`,
+      seconds: Number(v.duration?.seconds || 0),
+      timestamp: v.duration?.text || '',
+      author: { name: v.author?.name || 'Verified Creator' },
+      views: Number(v.view_count?.text?.replace(/[^0-9]/g, '') || v.views || 0),
+      thumbnail: v.thumbnails?.[0]?.url || v.thumbnail || '',
+    }));
 
     if (sort === 'views') {
       videos.sort((a, b) => Number(b.views || 0) - Number(a.views || 0));
@@ -1447,7 +1475,13 @@ export async function analyzeMediaUrl({
   _depth = 0,
 }) {
   const healedInput = normalizeExtractorTarget(rawUrl);
-  await assertSafeOutboundUrl(healedInput, { performDnsCheck: true });
+  // Fixture mode still enforces the synchronous SSRF + DRM guard, but skips
+  // the live DNS lookup so tests stay fully offline and deterministic.
+  if (isFixtureMode()) {
+    validateSafeExternalUrlSync(healedInput);
+  } else {
+    await assertSafeOutboundUrl(healedInput, { performDnsCheck: true });
+  }
 
   const hostLower = new URL(healedInput).hostname.toLowerCase();
   if (KNOWN_DRM_STREAMING_HOSTS.some((d) => hostLower === d || hostLower.endsWith(`.${d}`))) {
@@ -1457,6 +1491,10 @@ export async function analyzeMediaUrl({
       'Upstream stream is encrypted with Widevine/FairPlay hardware DRM and cannot be decrypted.'
     );
   }
+
+  // Deterministic offline test fixtures (never active in production).
+  const fixtureResult = getFixtureAnalysis(healedInput);
+  if (fixtureResult) return fixtureResult;
 
   const allPlatforms = await getActivePlatformsFromDb();
   const detected =

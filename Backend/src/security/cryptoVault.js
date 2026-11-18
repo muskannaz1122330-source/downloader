@@ -57,16 +57,14 @@ export async function verifySecretHash(plain, hash) {
 }
 
 export function verifyTotp2FA(tokenInput, totpSecret = ENV.ADMIN_TOTP_SECRET) {
-  const cleaned = String(tokenInput || '').trim();
-  if (!cleaned) {
-    // Allow password-only when client omits code ONLY if explicitly allowed; if passed, verify strictly!
-    return Boolean(ENV.ADMIN_ALLOW_DEV_TOTP_CODE);
-  }
-  if (ENV.ADMIN_ALLOW_DEV_TOTP_CODE && cleaned === ENV.ADMIN_ALLOW_DEV_TOTP_CODE) {
-    return true;
-  }
+  // Gate-2 2FA is mandatory in EVERY environment. There is no dev bypass,
+  // no empty-code shortcut and no fixed "123456" master code.
+  const cleaned = String(tokenInput || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(cleaned) || !totpSecret) return false;
   try {
-    return authenticator.check(cleaned, totpSecret);
+    // ±1 step (30s) tolerance for normal client/clock drift; still a real
+    // RFC-6238 verification, never a fixed dev code.
+    return authenticator.clone({ window: 1 }).check(cleaned, totpSecret);
   } catch {
     return false;
   }

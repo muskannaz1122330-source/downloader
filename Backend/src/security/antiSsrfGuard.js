@@ -110,6 +110,36 @@ export function normalizeCommonMirrorTypos(rawUrl) {
     .replace(/^(https?:\/\/)(?:www\.)?4funbox\.co(?=\/|$|\?)/i, '$1www.4funbox.com');
 }
 
+/**
+ * Canonicalise obfuscated IPv4 literals (decimal, hex, octal, short forms)
+ * so `2130706433`, `0x7f000001` and `0177.0.0.1` are all rejected as 127.0.0.1.
+ */
+function canonicalizeIpv4Host(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  if (net.isIP(h)) return h;
+
+  if (/^(?:0x[0-9a-f]+|\d+)$/.test(h)) {
+    const n = h.startsWith('0x') ? Number.parseInt(h, 16) : Number.parseInt(h, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 0xffffffff) {
+      return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+    }
+  }
+
+  const parts = h.split('.');
+  if (parts.length >= 2 && parts.length <= 4) {
+    const nums = parts.map((part) => {
+      if (/^0x[0-9a-f]+$/.test(part)) return Number.parseInt(part, 16);
+      if (/^0[0-7]+$/.test(part)) return Number.parseInt(part, 8);
+      if (/^\d+$/.test(part)) return Number.parseInt(part, 10);
+      return Number.NaN;
+    });
+    if (nums.every((n) => Number.isFinite(n) && n >= 0 && n <= 255)) {
+      return nums.join('.');
+    }
+  }
+  return h;
+}
+
 // Synchronous Fast Layer-1 URL + Private CIDR + Honest Widevine DRM Check
 export function validateSafeExternalUrlSync(rawUrl) {
   const healed = normalizeCommonMirrorTypos(rawUrl);
@@ -141,8 +171,8 @@ export function validateSafeExternalUrlSync(rawUrl) {
     );
   }
 
-  const bareHost = host.replace(/^\[|\]$/g, '');
-  if (net.isIP(bareHost) && isPrivateOrReservedIp(bareHost)) {
+  const bareHost = canonicalizeIpv4Host(host.replace(/^\[|\]$/g, ''));
+  if (FORBIDDEN_HOSTNAMES.has(bareHost) || (net.isIP(bareHost) && isPrivateOrReservedIp(bareHost))) {
     throw new AppError(
       403,
       'SSRF_BLOCKED',
@@ -172,13 +202,8 @@ export async function assertSafeOutboundUrl(rawUrl, { performDnsCheck = false } 
       const records = await dns.lookup(bareHost, { all: true });
       const hasPrivate = records.some((rec) => isPrivateOrReservedIp(rec.address));
       if (hasPrivate) {
-        // Check via Encrypted Cloudflare/Google DoH whether local ISP poisoned DNS to 127.0.0.1/0.0.0.0!
-        if (runtimeEnginePreferences.dnsOverHttpsBypass && bareHost.includes('.')) {
-          const realGlobalIps = await resolvePublicIpViaDoH(bareHost);
-          if (realGlobalIps.length > 0 && realGlobalIps.every((ip) => !isPrivateOrReservedIp(ip))) {
-            return parsed;
-          }
-        }
+        // Fail closed. A DoH answer must NEVER override a private DNS answer:
+        // the socket would still connect to the private address (M15).
         throw new AppError(
           403,
           'SSRF_BLOCKED',
@@ -187,6 +212,12 @@ export async function assertSafeOutboundUrl(rawUrl, { performDnsCheck = false } 
       }
     } catch (err) {
       if (err instanceof AppError) throw err;
+      // Fail closed on DNS errors too — fail-open silently allowed SSRF.
+      throw new AppError(
+        502,
+        'UPSTREAM_DNS_ERROR',
+        `Could not safely resolve ${bareHost}: ${err?.message || 'DNS lookup failed'}.`
+      );
     }
   }
 

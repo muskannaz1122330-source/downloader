@@ -13,7 +13,7 @@ import {
 import { updateRuntimeEnginePreferences } from '../services/trafficEngine.js';
 
 // ============================================================================
-// HIGH-TRAFFIC SMART XAMPP MYSQL ENGINE V8.0
+// HIGH-TRAFFIC SMART XAMPP MYSQL ENGINE V10.0
 // - 50-Connection Keep-Alive Pool (`connectionLimit: 50`, `queueLimit: 500`)
 // - Auto-imports `ultradownloader_xampp.sql` + syncs all 222 platforms cleanly
 // - Auto-restores persisted Engine Preferences from MySQL `system_settings`
@@ -49,14 +49,17 @@ const mem = {
   security_audit_logs: [],
 };
 let autoIdCounter = 1;
+const loggedStandbyMisses = new Set();
 
 async function ensureStandbyMemoryInitialized() {
   if (standbyReadyPromise) return standbyReadyPromise;
   standbyReadyPromise = (async () => {
     const now = new Date().toISOString();
+    // No shipped default admin credentials: hashes are derived from the
+    // environment (or from random one-off dev/test values).
     const [pinHash, passHash] = await Promise.all([
-      hashSecret('2580'),
-      hashSecret('UltraAdmin@2026'),
+      hashSecret(ENV.ADMIN_PIN),
+      hashSecret(ENV.ADMIN_PASSWORD),
     ]);
 
     mem.websites = [
@@ -88,11 +91,11 @@ async function ensureStandbyMemoryInitialized() {
       {
         id: 'admin-master-01',
         username: 'superadmin',
-        email: 'admin@ultradownloader.pro',
+        email: ENV.ADMIN_EMAIL,
         full_name: 'Master Super-Admin',
         password_hash: passHash,
         pin_hash: pinHash,
-        totp_secret: 'JBSWY3DPEHPK3PXP',
+        totp_secret: ENV.ADMIN_TOTP_SECRET,
         role: 'super_admin',
         last_login_at: null,
         created_at: now,
@@ -201,22 +204,58 @@ async function ensureXamppSchemaImported(host, port) {
     await bootstrapConn.query(
       `CREATE DATABASE IF NOT EXISTS \`${ENV.DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;`
     );
+    await bootstrapConn.query(`USE \`${ENV.DB_NAME}\`;`);
+
     const [tables] = await bootstrapConn.query(
       `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
       [ENV.DB_NAME]
     );
     const tableSet = new Set(tables.map((t) => t.TABLE_NAME || t.table_name));
-    if (!tableSet.has('admin_users') || !tableSet.has('platforms') || !tableSet.has('ip_lockouts')) {
-      const sqlFile = path.join(BACKEND_ROOT, 'database', 'ultradownloader_xampp.sql');
-      if (fs.existsSync(sqlFile)) {
-        const sqlDump = fs.readFileSync(sqlFile, 'utf8');
-        await bootstrapConn.query(sqlDump);
-        logger.info(
-          { database: ENV.DB_NAME, port },
-          'Auto-imported ultradownloader_xampp.sql directly into XAMPP MySQL!'
+    const required = ['admin_users', 'platforms', 'ip_lockouts', 'download_jobs'];
+    const missing = required.filter((t) => !tableSet.has(t));
+
+    if (missing.length > 0) {
+      if (!ENV.AUTO_IMPORT_SQL) {
+        throw new Error(
+          `MySQL schema is missing tables (${missing.join(', ')}). Import ` +
+            `Backend/database/ultradownloader_xampp.sql manually, or set AUTO_IMPORT_SQL=1 ` +
+            `to apply the idempotent schema.sql (never destructive).`
         );
       }
+      const schemaFile = path.join(BACKEND_ROOT, 'database', 'schema.sql');
+      if (!fs.existsSync(schemaFile)) {
+        throw new Error(`Idempotent schema file not found: ${schemaFile}`);
+      }
+      // schema.sql contains only CREATE TABLE IF NOT EXISTS. Re-running it can
+      // never DROP a table or destroy existing rows (fix for C5).
+      await bootstrapConn.query(fs.readFileSync(schemaFile, 'utf8'));
+      logger.info(
+        { database: ENV.DB_NAME, port, missing },
+        'Applied idempotent CREATE TABLE IF NOT EXISTS schema (no DROP, no seed wipe).'
+      );
     }
+
+    // Seed the master admin from environment secrets, never from a shipped
+    // bcrypt hash. INSERT IGNORE preserves an operator-rotated password.
+    const [pinHash, passHash] = await Promise.all([
+      hashSecret(ENV.ADMIN_PIN),
+      hashSecret(ENV.ADMIN_PASSWORD),
+    ]);
+    await bootstrapConn.execute(
+      `INSERT IGNORE INTO admin_users
+        (id, username, email, full_name, password_hash, pin_hash, totp_secret, role, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'super_admin', ?)`,
+      [
+        'admin-master-01',
+        'superadmin',
+        ENV.ADMIN_EMAIL,
+        'Master Super-Admin',
+        passHash,
+        pinHash,
+        ENV.ADMIN_TOTP_SECRET,
+        new Date().toISOString(),
+      ]
+    );
   } finally {
     await bootstrapConn.end().catch(() => {});
   }
@@ -317,7 +356,7 @@ async function tryConnectXamppMysqlOnce() {
     try {
       await ensureXamppSchemaImported(ENV.DB_HOST, port);
 
-      // HIGH-TRAFFIC V8.0 POOL: 50 parallel keep-alive connections + 500 request queue!
+      // HIGH-TRAFFIC V10.0 POOL: 50 parallel keep-alive connections + 500 request queue!
       const candidatePool = mysql.createPool({
         host: ENV.DB_HOST,
         port,
@@ -423,6 +462,8 @@ export async function getDatabaseHealth() {
         port: activeDbPort,
         database: ENV.DB_NAME,
         connected: rows[0]?.ok === 1,
+        mysqlConnected: rows[0]?.ok === 1,
+        available: true,
         standbyMode: false,
         poolLimit: 50,
         activeConnections: internalPool?._allConnections?.length || 1,
@@ -437,11 +478,14 @@ export async function getDatabaseHealth() {
     }
   }
   return {
-    driver: 'mysql',
+    driver: 'mysql-standby',
     host: ENV.DB_HOST,
     port: activeDbPort,
     database: ENV.DB_NAME,
-    connected: true,
+    // Honest status: MySQL is NOT connected; the in-memory emulator is serving.
+    connected: false,
+    mysqlConnected: false,
+    available: true,
     standbyMode: true,
     poolLimit: 50,
     activeConnections: 0,
@@ -455,6 +499,26 @@ export async function getDatabaseHealth() {
 
 function executeStandbyMemoryQuery(sqlText, params = []) {
   const q = sqlText.replace(/\s+/g, ' ').trim();
+
+  // ---- Strict, user-scoped download-job queries (H8) -----------------------
+  if (/^SELECT \* FROM download_jobs WHERE id = \? AND user_id = \?/i.test(q)) {
+    return mem.download_jobs.filter((d) => d.id === params[0] && d.user_id === params[1]);
+  }
+  if (/^SELECT id, local_output_path FROM download_jobs WHERE id = \? AND user_id = \?/i.test(q)) {
+    return mem.download_jobs
+      .filter((d) => d.id === params[0] && d.user_id === params[1])
+      .map((d) => ({ id: d.id, local_output_path: d.local_output_path }));
+  }
+  if (/^SELECT (id, status, local_output_path|\*) FROM download_jobs WHERE user_id = \?/i.test(q)) {
+    return [...mem.download_jobs]
+      .filter((d) => d.user_id === params[0])
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, /LIMIT 100/i.test(q) ? 100 : undefined);
+  }
+  if (/^SELECT COUNT\(\*\) AS cnt FROM (\w+)$/i.test(q)) {
+    const tbl = q.match(/^SELECT COUNT\(\*\) AS cnt FROM (\w+)$/i)[1];
+    return [{ cnt: (mem[tbl] || []).length }];
+  }
 
   if (/^SELECT \* FROM websites/i.test(q)) return [...mem.websites];
   if (/^SELECT \* FROM admin_users LIMIT 1/i.test(q)) return mem.admin_users.slice(0, 1);
@@ -678,6 +742,14 @@ function executeStandbyMemoryQuery(sqlText, params = []) {
     if (row) row.views = params[0];
     return { affectedRows: 1 };
   }
+  if (/WHERE id = \? AND user_id = \?/i.test(q) && /^UPDATE download_jobs/i.test(q)) {
+    const id = params[params.length - 2];
+    const uid = params[params.length - 1];
+    const row = mem.download_jobs.find((d) => d.id === id && d.user_id === uid);
+    if (row && q.includes("SET status = 'paused'")) row.status = 'paused';
+    if (row && q.includes("SET status = 'cancelled'")) row.status = 'cancelled';
+    return { affectedRows: row ? 1 : 0 };
+  }
   if (/^UPDATE download_jobs/i.test(q)) {
     const id = params[params.length - 1];
     const row = mem.download_jobs.find((d) => d.id === id);
@@ -702,12 +774,46 @@ function executeStandbyMemoryQuery(sqlText, params = []) {
     }
     return { affectedRows: 1 };
   }
-  if (/^DELETE FROM (\w+) WHERE (\w+) = \?/i.test(q)) {
-    const [, tbl, col] = q.match(/^DELETE FROM (\w+) WHERE (\w+) = \?/i);
+  // ---- Strict DELETE guards: never delete across users -------------------
+  if (/^DELETE FROM download_jobs WHERE id = \? AND user_id = \?/i.test(q)) {
+    const before = mem.download_jobs.length;
+    mem.download_jobs = mem.download_jobs.filter(
+      (d) => !(d.id === params[0] && d.user_id === params[1])
+    );
+    return { affectedRows: before - mem.download_jobs.length };
+  }
+  if (/^DELETE FROM download_jobs WHERE user_id = \? AND status IN/i.test(q)) {
+    const before = mem.download_jobs.length;
+    mem.download_jobs = mem.download_jobs.filter(
+      (d) => d.user_id !== params[0] || !['completed', 'cancelled'].includes(d.status)
+    );
+    return { affectedRows: before - mem.download_jobs.length };
+  }
+  if (/^DELETE FROM (\w+) WHERE (\w+) = \?$/i.test(q)) {
+    const [, tbl, col] = q.match(/^DELETE FROM (\w+) WHERE (\w+) = \?$/i);
+    const before = (mem[tbl] || []).length;
     if (mem[tbl]) mem[tbl] = mem[tbl].filter((r) => r[col] !== params[0]);
+    return { affectedRows: before - (mem[tbl] || []).length };
+  }
+  if (/^DELETE FROM (\w+) WHERE email LIKE/i.test(q)) {
+    const tbl = q.match(/^DELETE FROM (\w+)/i)[1];
+    const prefix = String(params[0] || '').replace(/%/g, '');
+    const before = (mem[tbl] || []).length;
+    if (mem[tbl]) mem[tbl] = mem[tbl].filter((r) => !String(r.email || '').startsWith(prefix));
+    return { affectedRows: before - (mem[tbl] || []).length };
+  }
+  if (/^DELETE FROM (\w+)$/i.test(q)) {
+    const tbl = q.match(/^DELETE FROM (\w+)$/i)[1];
+    if (mem[tbl]) mem[tbl] = [];
     return { affectedRows: 1 };
   }
 
+  // Unmatched SQL in standby is a bug, not a silent empty result. Log once so
+  // it is visible during development instead of hiding a broken feature.
+  if (!loggedStandbyMisses.has(q)) {
+    loggedStandbyMisses.add(q);
+    logger.warn({ sql: q.slice(0, 180) }, 'Standby SQL emulator: unhandled query');
+  }
   return [];
 }
 

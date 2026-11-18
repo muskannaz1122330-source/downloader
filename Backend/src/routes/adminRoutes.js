@@ -4,6 +4,8 @@ import path from 'node:path';
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { ENV } from '../config/env.js';
+import { isFixtureMode, getFixtureMediaBuffer } from '../services/offlineFixtures.js';
+import { getSourcesHealth } from '../services/sourceHealth.js';
 import { sqlQuery, writeSecurityAuditLog } from '../db/database.js';
 import { AppError, asyncHandler, sendSuccess } from '../utils/errors.js';
 import {
@@ -70,7 +72,8 @@ adminRouter.post(
     const padlockTicket = signPadlockTicket(req.clientIp);
     res.cookie('ud_padlock_ticket', padlockTicket, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
+      secure: ENV.isProduction,
       maxAge: 10 * 60 * 1000,
       path: '/',
     });
@@ -135,6 +138,7 @@ adminRouter.post(
     res.cookie('ud_admin_jwt', adminAccessToken, {
       httpOnly: true,
       sameSite: 'lax',
+      secure: ENV.isProduction,
       maxAge: 8 * 60 * 60 * 1000,
       path: '/',
     });
@@ -168,6 +172,11 @@ adminRouter.get('/live-cards/stream', (req, res) => {
 
 adminRouter.get('/live-cards', (_req, res) => {
   return sendSuccess(res, getAllVolatileCards());
+});
+
+// Honest per-source verification telemetry (never a fabricated 222/222 claim).
+adminRouter.get('/sources-health', (_req, res) => {
+  return sendSuccess(res, getSourcesHealth());
 });
 
 // [ VIEW ] BUTTON -> Streams Live Video in Center Modal (0 SQL Rows & 0 Disk Bytes!)
@@ -231,6 +240,20 @@ adminRouter.post(
 
     // Archive real playable MP4 to Vault storage asynchronously via Pure Node.js 32x IDM Stream Engine
     (async () => {
+      if (isFixtureMode()) {
+        // Deterministic offline archive: real bytes on disk, zero network.
+        await fs.writeFile(targetMp4Path, getFixtureMediaBuffer('mp4')).catch(() => {});
+        if (fsSync.existsSync(targetMp4Path)) {
+          const st = await fs.stat(targetMp4Path).catch(() => null);
+          if (st) {
+            await sqlQuery(
+              'UPDATE saved_vault_videos SET file_present_on_disk = 1, file_size_bytes = ?, stream_url = ? WHERE id = ?',
+              [st.size, `/api/v1/admin/vault/${vaultId}/stream`, vaultId]
+            ).catch(() => {});
+          }
+        }
+        return;
+      }
       try {
         const analysis = await analyzeMediaUrl({ rawUrl: card.rawUrl });
         const candidateUrl =
@@ -447,7 +470,7 @@ adminRouter.get(
         completed: Number(downloadStats[0]?.completed || 0),
       },
       {
-        channel: 'Live Search Engine (yt-dlp ytsearch)',
+        channel: 'Live Search Engine (youtubei.js InnerTube)',
         events: evtMap.search_executed || 0,
         downloads: 0,
         completed: 0,
@@ -540,11 +563,11 @@ adminRouter.get(
     return sendSuccess(res, [
       {
         id: 'diag-binaries',
-        title: `Extractor Core: yt-dlp ${binaries.ytdlpVersion || 'Offline'} + FFmpeg ${binaries.ffmpegInstalled ? 'Ready' : 'Missing'}`,
+        title: `Extractor Core: Pure Node.js ${binaries.engineMode || 'Direct HTTP 206'} · yt-dlp removed`,
         impact: 'LIVE ENGINE',
         gainEstimate: `${sCount} Active SEO Routes`,
         description:
-          'Live stream extraction, real multi-track FFmpeg audio/video muxing, and HTTP 206 Range streaming are active.',
+          'Pure Node.js extraction with HTTP 206 Range streaming; no yt-dlp or FFmpeg binaries required.',
       },
       {
         id: 'diag-cookies',
@@ -554,7 +577,7 @@ adminRouter.get(
         description:
           cCount === 0
             ? 'Upload Netscape cookies.txt in the Sites & Cookies tab to unlock login-gated Vimeo, Instagram, or TeraBox streams.'
-            : `${cCount} encrypted cookie profile(s) available for authenticated yt-dlp extraction.`,
+            : `${cCount} encrypted cookie profile(s) available for authenticated extraction.`,
       },
       {
         id: 'diag-ads-ledger',

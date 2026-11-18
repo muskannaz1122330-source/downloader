@@ -1,0 +1,24 @@
+# Dependencies / build output
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+
+# Local secrets — NEVER commit .env files. Only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Runtime storage / logs
+*.log
+Backend/storage/tmp/*
+!Backend/storage/tmp/.gitkeep
+Backend/storage/vault/*
+!Backend/storage/vault/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

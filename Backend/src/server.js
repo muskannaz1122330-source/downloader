@@ -50,5 +50,7 @@ async function bootstrapServer() {
 }
 
 bootstrapServer().catch((err) => {
-  logger.error({ err }, 'Unexpected warning during bootstrap');
+  // Fail fast: a half-initialized API must never stay listening and appear healthy.
+  logger.error({ err }, 'Fatal bootstrap error — exiting');
+  process.exit(1);
 });

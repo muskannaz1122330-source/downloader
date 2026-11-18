@@ -96,6 +96,21 @@ export function HeroSmartAnalyzer({ presetPlatform = null }) {
     }
   }, [presetPlatform]);
 
+  // PWA Web Share Target: manifest.webmanifest sends GET /?url=... (or ?text=...)
+  // Auto-fill the analyser input so a shared link is one tap away from analysis.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const shared = params.get('url') || params.get('text') || '';
+      if (shared) {
+        setInputVal(shared.trim());
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    } catch {
+      /* ignore malformed share URLs */
+    }
+  }, []);
+
   const detectedPlatform = useMemo(() => {
     const raw = inputVal.trim().toLowerCase();
     if (!raw || !raw.includes('.')) return presetPlatform || null;

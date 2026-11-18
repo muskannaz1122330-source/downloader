@@ -8,10 +8,9 @@ import {
 } from '../security/cryptoVault.js';
 
 export function resolveClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    return forwarded.split(',')[0].trim();
-  }
+  // Express derives req.ip from the socket + a bounded, explicitly configured
+  // number of trusted proxy hops. Never trust a raw X-Forwarded-For header,
+  // otherwise an attacker can spoof any IP and evade the 3-strike lockout.
   return req.ip || req.socket?.remoteAddress || '127.0.0.1';
 }
 
@@ -159,10 +158,12 @@ export function requirePadlockGate1Ticket(req, _res, next) {
 // Require Full Gate-1 + Gate-2 Signed Super-Admin JWT Token!
 export function requireSuperAdminAuth(req, _res, next) {
   const headerVal = String(req.headers['x-admin-token'] || '');
+  // Query-string tokens leak into access logs, proxies, browser history and
+  // referrers. Only the header or the httpOnly cookie is accepted (SSE uses
+  // the `ud_admin_jwt` cookie with `withCredentials: true`).
   const rawToken =
     (headerVal.startsWith('Bearer ') ? headerVal.slice(7) : headerVal) ||
-    req.cookies?.ud_admin_jwt ||
-    req.query?.adminToken;
+    req.cookies?.ud_admin_jwt;
 
   if (!rawToken) {
     throw new AppError(401, 'UNAUTHORIZED', 'Super-Admin authentication required.');

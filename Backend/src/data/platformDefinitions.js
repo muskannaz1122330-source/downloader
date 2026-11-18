@@ -1,5 +1,5 @@
 // ============================================================================
-// ULTRADOWNLOADER V8.0 — COMPLETE 222-PLATFORM MULTI-DOMAIN REGISTRY
+// ULTRADOWNLOADER V10.0 — COMPLETE 222-PLATFORM MULTI-DOMAIN REGISTRY
 // - Social Media:       22 Supported Platforms
 // - Video & Movies:     34 Supported Platforms (All 17 User Movie Portals + 17 Global)
 // - Courses & Lectures: 32 Supported Platforms (Free Open + Enrolled Cookie Auth)
@@ -347,7 +347,7 @@ export function detectPlatformFromUrl(rawUrl, platformsList = PLATFORM_DEFINITIO
         return 'Web Stream';
       }
     })(),
-    subtitle: 'Universal Live yt-dlp / Deep Sniffer',
+    subtitle: 'Universal Pure-Node Deep Sniffer',
     category: 'video',
     accentColor: '#38BDF8',
     iconKey: 'globe',

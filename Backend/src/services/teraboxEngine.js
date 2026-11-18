@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { AppError } from '../utils/errors.js';
 import { normalizeCommonMirrorTypos } from '../security/antiSsrfGuard.js';
 import { recordRxBytes, runtimeEnginePreferences } from './trafficEngine.js';
+import { isFixtureMode, serveFixtureTs } from './offlineFixtures.js';
 
 // ============================================================================
 // 100% FREE NATIVE MULTI-MIRROR TERABOX + ITERAPLAY + TERAVIRALHUB ENGINE
@@ -602,6 +603,9 @@ async function getTeraboxDirectByteMap(sourceUrl, fsIdHint, quality) {
 
 // TRUE HTTP 200 / 206 DIRECT DOWNLOAD STREAM FOR WINDOWS PC IDM (16-32 SOCKETS!) & GOOGLE CHROME!
 export async function streamLiveTeraboxDirectDownload(req, res) {
+  if (isFixtureMode()) {
+    return serveFixtureTs(req, res, String(req.query.filename || '').trim() || 'TeraBox_Fixture_Video.ts');
+  }
   const surl = String(req.query.surl || '').trim();
   const fsId = String(req.query.fs_id || '').trim();
   const rawUrl =
