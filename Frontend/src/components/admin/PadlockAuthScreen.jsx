@@ -6,9 +6,9 @@ import { UltraApi } from '../../services/apiClient';
 export function PadlockAuthScreen({ onAuthenticated }) {
   const [step, setStep] = useState(1);
   const [pin, setPin] = useState('');
-  const [email, setEmail] = useState('admin@ultradownloader.pro');
-  const [password, setPassword] = useState('UltraAdmin@2026');
-  const [totpCode, setTotpCode] = useState('123456');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);

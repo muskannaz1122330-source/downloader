@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            Backend/package-lock.json
+            Frontend/package-lock.json
+
+      - name: Install Backend
+        working-directory: Backend
+        run: npm ci --no-audit --no-fund
+      - name: Install Frontend
+        working-directory: Frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax check (all JS/CJS + JSON)
+        run: |
+          find Backend Frontend .github \
+            -path '*/node_modules' -prune -o -path '*/dist' -prune -o \
+            \( -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \) -print0 \
+            | xargs -0 -n1 node --check
+          find Backend Frontend -path '*/node_modules' -prune -o -name '*.json' -print0 \
+            | xargs -0 -n1 node -e "JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8'))"
+
+      - name: Backend tests (offline fixtures)
+        working-directory: Backend
+        run: npm test
+      - name: Frontend tests (offline fixtures)
+        working-directory: Frontend
+        run: npm test
+      - name: Frontend production build
+        working-directory: Frontend
+        run: npm run build
+
+      - name: Dependency audit (Backend)
+        working-directory: Backend
+        run: npm audit --omit=dev --audit-level=high
+      - name: Dependency audit (Frontend)
+        working-directory: Frontend
+        run: npm audit --omit=dev --audit-level=high

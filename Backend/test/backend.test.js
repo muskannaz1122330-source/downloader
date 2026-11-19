@@ -6,6 +6,18 @@ import { createBackendApp } from '../src/app.js';
 import { BACKEND_ROOT } from '../src/config/env.js';
 import { initDatabase, sqlQuery } from '../src/db/database.js';
 import { clearAllVolatileCards } from '../src/services/liveCardBus.js';
+import { authenticator } from 'otplib';
+
+// Offline fixture session: a genuinely valid TOTP is generated here so the
+// real (now mandatory) RFC-6238 verification path is exercised.
+function fixtureAdminSession() {
+  return {
+    email: process.env.ADMIN_EMAIL,
+    password: process.env.ADMIN_PASSWORD,
+    pin: process.env.ADMIN_PIN,
+    totpCode: authenticator.generate(process.env.ADMIN_TOTP_SECRET),
+  };
+}
 
 describe('UltraDownloader V10.0 — Zero yt-dlp.exe Pure IDM/Chrome + Strict User History Suite', () => {
   let app;
@@ -502,16 +514,16 @@ describe('UltraDownloader V10.0 — Zero yt-dlp.exe Pure IDM/Chrome + Strict Use
 
     const gate1 = await adminAgent
       .post('/api/v1/admin/padlock/verify')
-      .send({ pin: '2580' })
+      .send({ pin: fixtureAdminSession().pin })
       .expect(200);
     expect(gate1.body.data.padlockTicket).toBeTruthy();
 
     const gate2 = await adminAgent
       .post('/api/v1/admin/auth/login')
       .send({
-        identifier: 'admin@ultradownloader.pro',
-        password: 'UltraAdmin@2026',
-        totpCode: '123456',
+        identifier: fixtureAdminSession().email,
+        password: fixtureAdminSession().password,
+        totpCode: fixtureAdminSession().totpCode,
       })
       .expect(200);
     expect(gate2.body.data.adminAccessToken).toBeTruthy();
@@ -536,12 +548,20 @@ describe('UltraDownloader V10.0 — Zero yt-dlp.exe Pure IDM/Chrome + Strict Use
     clearAllVolatileCards();
   });
 
-  it('9. Verifies Live Settings Control Center & XAMPP MySQL Diagnostics API', async () => {
-    const diag = await guestAgent.get('/api/v1/system/db-diagnostics').expect(200);
-    expect(diag.body.data.diagnostics.connected).toBe(true);
-    expect(diag.body.data.diagnostics.tableCounts.platforms).toBeGreaterThanOrEqual(222);
+  it('9. Verifies admin-only system control + honest MySQL standby diagnostics', async () => {
+    // These endpoints are now super-admin only (C3).
+    await guestAgent.get('/api/v1/system/db-diagnostics').expect(401);
+    await guestAgent.post('/api/v1/system/db-maintenance').send({ action: 'optimize_tables' }).expect(401);
 
-    const maint = await guestAgent
+    const diag = await adminAgent.get('/api/v1/system/db-diagnostics').expect(200);
+    const d = diag.body.data.diagnostics;
+    expect(d.available).toBe(true);
+    // Honest status: with no MySQL server the standby emulator must not claim connected.
+    expect(d.connected).toBe(d.mysqlConnected);
+    expect(d.standbyMode).toBe(!d.mysqlConnected);
+    expect(d.tableCounts.platforms).toBeGreaterThanOrEqual(222);
+
+    const maint = await adminAgent
       .post('/api/v1/system/db-maintenance')
       .send({ action: 'optimize_tables' })
       .expect(200);

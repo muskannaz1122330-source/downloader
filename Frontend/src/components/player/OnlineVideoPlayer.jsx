@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import Hls from 'hls.js';
 import { Play, Volume2, VolumeX, Maximize2 } from 'lucide-react';
 
 export function OnlineVideoPlayer({
@@ -26,25 +25,40 @@ export function OnlineVideoPlayer({
 
     const isHlsStream =
       /\.m3u8(\?.*)?$/i.test(streamUrl) || streamUrl.includes('/stream/terabox-hls');
+    let cancelled = false;
 
-    if (isHlsStream && Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-        maxBufferLength: 30,
-      });
-      hlsRef.current = hls;
-      hls.loadSource(streamUrl);
-      hls.attachMedia(videoEl);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (autoPlay) videoEl.play().catch(() => {});
-      });
+    if (isHlsStream) {
+      // hls.js is ~594 kB: load it ONLY when an actual HLS stream is played,
+      // so the initial bundle stays small (M24).
+      import('hls.js')
+        .then(({ default: Hls }) => {
+          if (cancelled) return;
+          if (!Hls.isSupported()) {
+            videoEl.src = streamUrl;
+            return;
+          }
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: false,
+            maxBufferLength: 30,
+          });
+          hlsRef.current = hls;
+          hls.loadSource(streamUrl);
+          hls.attachMedia(videoEl);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (autoPlay) videoEl.play().catch(() => {});
+          });
+        })
+        .catch(() => {
+          if (!cancelled) videoEl.src = streamUrl;
+        });
     } else {
       videoEl.src = streamUrl;
       if (autoPlay) videoEl.play().catch(() => {});
     }
 
     return () => {
+      cancelled = true;
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;

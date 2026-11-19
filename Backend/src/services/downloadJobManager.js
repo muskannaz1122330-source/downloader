@@ -5,7 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { ENV } from '../config/env.js';
 import { sqlQuery } from '../db/database.js';
 import { AppError } from '../utils/errors.js';
-import { assertSafeOutboundUrl, normalizeCommonMirrorTypos } from '../security/antiSsrfGuard.js';
+import { assertSafeOutboundUrl, validateSafeExternalUrlSync, normalizeCommonMirrorTypos } from '../security/antiSsrfGuard.js';
+import { isFixtureMode } from './offlineFixtures.js';
 import { analyzeMediaUrl, wrapDirectPassThroughUrl } from './extractorEngine.js';
 import { isTeraboxEcosystemUrl, downloadTeraboxFullVideoTurbo } from './teraboxEngine.js';
 import {
@@ -59,7 +60,11 @@ export async function resolveInstantDirectStreamPayload({
   totalBytes = 0,
 }) {
   const healedUrl = normalizeCommonMirrorTypos(String(sourceUrl || '').trim());
-  await assertSafeOutboundUrl(healedUrl, { performDnsCheck: true });
+  if (isFixtureMode()) {
+    validateSafeExternalUrlSync(healedUrl);
+  } else {
+    await assertSafeOutboundUrl(healedUrl, { performDnsCheck: true });
+  }
 
   let resolvedTitle = title;
   let resolvedExt = String(formatExt || 'mp4').toLowerCase();

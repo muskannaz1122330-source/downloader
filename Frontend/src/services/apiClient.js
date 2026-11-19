@@ -5,7 +5,7 @@ const API_BASE =
   (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:4000/api/v1' : '/api/v1');
 
 // ============================================================================
-// 100% PURE LIVE FULL-STACK REST + SSE CLIENT V8.0
+// 100% PURE LIVE FULL-STACK REST + SSE CLIENT V10.0
 // ZERO MOCK DATA · ZERO FAKE ARRAYS · ZERO LOCALSTORAGE FALLBACKS!
 // ============================================================================
 
@@ -397,15 +397,12 @@ export const UltraApi = {
   },
 
   subscribeAdminLiveCards(onEvent) {
-    const adminToken = sessionStorage.getItem('ud_admin_access_token') || '';
-    if (typeof EventSource === 'undefined' || !adminToken) {
-      return () => {};
-    }
-
-    const es = new EventSource(
-      `${API_BASE}/admin/live-cards/stream?adminToken=${encodeURIComponent(adminToken)}`,
-      { withCredentials: true }
-    );
+    if (typeof EventSource === 'undefined') return () => {};
+    // EventSource cannot set headers, so authentication uses the httpOnly
+    // `ud_admin_jwt` cookie set at login. Never put a JWT in the query string.
+    const es = new EventSource(`${API_BASE}/admin/live-cards/stream`, {
+      withCredentials: true,
+    });
 
     ['snapshot', 'card_added', 'card_updated', 'card_removed'].forEach((evtName) => {
       es.addEventListener(evtName, (msg) => {
@@ -553,6 +550,10 @@ export const UltraApi = {
 
   getAuditLogs() {
     return apiRequest('/admin/audit-logs');
+  },
+
+  getSourcesHealth() {
+    return apiRequest('/admin/sources-health');
   },
 };
 

@@ -16,6 +16,22 @@ import {
 } from '../services/fileDownload';
 import { getApiBaseOrigin } from '../services/apiClient';
 
+
+// Fetch test-only credentials from the backend fixture endpoint, then run the
+// REAL Gate-1 PIN + Gate-2 password + TOTP flow (no bypass, no shipped secrets).
+async function fixtureAdminLogin() {
+  const res = await fetch(`${getApiBaseOrigin()}/api/v1/__fixtures__/session`);
+  const body = await res.json();
+  const session = body.data;
+  await UltraApi.verifyPin(session.pin);
+  await UltraApi.loginAdmin({
+    email: session.email,
+    password: session.password,
+    totpCode: session.totpCode,
+  });
+  return session;
+}
+
 describe('UltraDownloader V10.0 — Full Real UI + Backend End-to-End Verification Suite', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -252,15 +268,9 @@ describe('UltraDownloader V10.0 — Full Real UI + Backend End-to-End Verificati
   });
 
   it('3. Executes 100% LIVE full-stack Admin Padlock Login + Zero-DB RAM Paste -> VIEW -> SAVE -> Vault DELETE', async () => {
-    const gate1 = await UltraApi.verifyPin('2580');
-    expect(gate1.padlockTicket).toBeTruthy();
-
-    const gate2 = await UltraApi.loginAdmin({
-      email: 'admin@ultradownloader.pro',
-      password: 'UltraAdmin@2026',
-      totpCode: '123456',
-    });
-    expect(gate2.adminAccessToken).toBeTruthy();
+    const session = await fixtureAdminLogin();
+    expect(session.pin).toBeTruthy();
+    expect(sessionStorage.getItem('ud_admin_access_token')).toBeTruthy();
 
     const initialVault = await UltraApi.getVaultVideos();
     const initialCount = initialVault.length;
@@ -329,6 +339,9 @@ describe('UltraDownloader V10.0 — Full Real UI + Backend End-to-End Verificati
     await UltraApi.logoutUser();
     expect(await UltraApi.listDownloadJobs()).toEqual([]);
 
+    // /system/* endpoints are now super-admin only (C3): authenticate first.
+    await fixtureAdminLogin();
+
     // Verify singular savePlatformCookie alias used in SettingsPage works 100% live!
     const ckSaved = await UltraApi.savePlatformCookie({
       platformId: 'terabox',
@@ -338,12 +351,6 @@ describe('UltraDownloader V10.0 — Full Real UI + Backend End-to-End Verificati
     expect(ckSaved).toBeTruthy();
     await sqlCleanupCookies();
 
-    await UltraApi.verifyPin('2580');
-    await UltraApi.loginAdmin({
-      email: 'admin@ultradownloader.pro',
-      password: 'UltraAdmin@2026',
-      totpCode: '123456',
-    });
     await UltraApi.clearAllLiveCards();
   });
 });

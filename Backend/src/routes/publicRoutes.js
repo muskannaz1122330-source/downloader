@@ -45,7 +45,8 @@ import {
   batchControlDownloadJobs,
 } from '../services/downloadJobManager.js';
 import { pushOrUpdateVolatileCard, getAllVolatileCards } from '../services/liveCardBus.js';
-import { requireRegisteredUser } from '../middleware/securityMiddleware.js';
+import { recordSourceAttempt } from '../services/sourceHealth.js';
+import { requireRegisteredUser, requireSuperAdminAuth } from '../middleware/securityMiddleware.js';
 import {
   DEFAULT_AD_WATERFALL,
   DEFAULT_SYSTEM_SETTINGS,
@@ -71,6 +72,26 @@ import {
 } from '../services/trafficEngine.js';
 
 export const publicRouter = express.Router();
+
+/** Reject stored/redirect targets that are not a safe public media URL. */
+function assertSafeDownloadTarget(target) {
+  const value = String(target || '').trim();
+  if (!value) throw new AppError(400, 'VALIDATION_ERROR', 'Missing download stream URL.');
+  if (value.startsWith('/')) {
+    if (!value.startsWith('/api/v1/stream/')) {
+      throw new AppError(400, 'INVALID_STREAM_URL', 'Unsupported internal stream target.');
+    }
+    return;
+  }
+  if (!/^https?:\/\//i.test(value)) {
+    throw new AppError(400, 'INVALID_STREAM_URL', 'Stream URL must be an HTTP(S) address.');
+  }
+  try {
+    validateSafeExternalUrlSync(value);
+  } catch {
+    throw new AppError(400, 'INVALID_STREAM_URL', 'Stream URL points to a blocked or unsafe target.');
+  }
+}
 
 export async function loadAdWaterfallMapFromDb() {
   return cachedOrCoalesced('sql:ad_waterfall_map', 10000, async () => {
@@ -141,7 +162,7 @@ publicRouter.get(
     return sendSuccess(res, {
       status: 'online',
       service: 'UltraDownloader High-Traffic Lockstep Engine',
-      version: '8.0.0',
+      version: '10.0.0',
       database,
       binaries,
       traffic: getBackendTrafficSnapshot(),
@@ -189,6 +210,7 @@ publicRouter.get(
 
 publicRouter.put(
   '/system/settings',
+  requireSuperAdminAuth,
   asyncHandler(async (req, res) => {
     const updated = updateRuntimeEnginePreferences(req.body || {});
     const now = new Date().toISOString();
@@ -210,6 +232,7 @@ publicRouter.put(
 // Live MySQL Database Diagnostics & 1-Click Maintenance (Optimize Tables / Clear Cache / Clean Completed)
 publicRouter.get(
   '/system/db-diagnostics',
+  requireSuperAdminAuth,
   asyncHandler(async (_req, res) => {
     const [diagnostics, binaries] = await Promise.all([
       getDatabaseDiagnostics(),
@@ -226,6 +249,7 @@ publicRouter.get(
 
 publicRouter.post(
   '/system/db-maintenance',
+  requireSuperAdminAuth,
   asyncHandler(async (req, res) => {
     const action = String(req.body?.action || 'optimize_tables');
     let clearedCacheEntries = 0;
@@ -262,6 +286,7 @@ publicRouter.post(
 // Save Enrolled Course / TeraBox Netscape Cookies Encrypted in MySQL (AES-256-GCM) directly from Settings!
 publicRouter.post(
   '/system/cookies',
+  requireSuperAdminAuth,
   asyncHandler(async (req, res) => {
     const platformId = String(req.body?.platformId || 'udemy').trim().toLowerCase();
     const platformLabel = String(req.body?.platformLabel || platformId.toUpperCase()).trim();
@@ -296,6 +321,7 @@ publicRouter.post(
 
 publicRouter.post(
   '/system/clear-cache',
+  requireSuperAdminAuth,
   asyncHandler(async (_req, res) => {
     clearReadThroughCache();
     return sendSuccess(res, { cleared: true, timestamp: new Date().toISOString() });
@@ -370,7 +396,7 @@ publicRouter.post(
     );
 
     const token = signUserAccessToken(user);
-    res.cookie('ud_user_jwt', token, { httpOnly: true, sameSite: 'lax', path: '/' });
+    res.cookie('ud_user_jwt', token, { httpOnly: true, sameSite: 'lax', secure: ENV.isProduction, path: '/' });
     return sendSuccess(res, { userAccessToken: token, user }, 201);
   })
 );
@@ -393,7 +419,7 @@ publicRouter.post(
       dailyQuota: Number(row.daily_quota),
     };
     const token = signUserAccessToken(user);
-    res.cookie('ud_user_jwt', token, { httpOnly: true, sameSite: 'lax', path: '/' });
+    res.cookie('ud_user_jwt', token, { httpOnly: true, sameSite: 'lax', secure: ENV.isProduction, path: '/' });
     return sendSuccess(res, { userAccessToken: token, user });
   })
 );
@@ -565,7 +591,7 @@ publicRouter.post(
   })
 );
 
-// 7. Real Live Search via `yt-dlp ytsearch:`
+// 7. Real Live Search via youtubei.js InnerTube
 publicRouter.get(
   '/search',
   asyncHandler(async (req, res) => {
@@ -583,7 +609,7 @@ publicRouter.get(
   })
 );
 
-// 8. Full Multi-Engine URL Analysis (TeraPlay Free + yt-dlp + Deep Movie/Course Sniffer)
+// 8. Full Multi-Engine URL Analysis (TeraPlay Free + Pure-Node Deep Sniffer)
 publicRouter.post(
   '/analysis',
   asyncHandler(async (req, res) => {
@@ -592,11 +618,29 @@ publicRouter.post(
     const pasteLeadId = String(req.body?.pasteLeadId || req.body?.cardId || '');
     const ephemeralCookiesTxt = String(req.body?.ephemeralCookiesTxt || '');
 
-    const analysis = await analyzeMediaUrl({
-      rawUrl,
-      selectedPlatformId,
-      ephemeralCookiesTxt,
-    });
+    const startedAt = Date.now();
+    let analysis;
+    try {
+      analysis = await analyzeMediaUrl({
+        rawUrl,
+        selectedPlatformId,
+        ephemeralCookiesTxt,
+      });
+      recordSourceAttempt({
+        platformId: analysis.platform?.id || selectedPlatformId || 'unresolved',
+        adapter: analysis.extractorTier || '',
+        ok: true,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      recordSourceAttempt({
+        platformId: selectedPlatformId || 'unresolved',
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        failureCode: err?.code || err?.name || 'ANALYSIS_FAILED',
+      });
+      throw err;
+    }
 
     logAnalyticsEvent(req.websiteProjectId, 'video_analyzed', analysis.platform.id, {
       extractorTier: analysis.extractorTier,
@@ -774,6 +818,7 @@ publicRouter.post(
     if (!rawTarget) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Missing download stream URL.');
     }
+    assertSafeDownloadTarget(rawTarget);
     const cleanName =
       String(req.body?.fileName || 'UltraDownloader_Video.mp4')
         .replace(/[^\p{L}\p{N}\s_.-]/gu, '')
@@ -832,8 +877,9 @@ publicRouter.delete(
 
 publicRouter.get(
   '/downloads/:id/file',
+  requireRegisteredUser,
   asyncHandler(async (req, res) => {
-    const rawJob = await getDownloadJobRawRow(req.params.id);
+    const rawJob = await getDownloadJobRawRow(req.params.id, req.user.sub);
     if (rawJob.local_output_path) {
       const mimeMap = {
         mp4: 'video/mp4',
@@ -855,8 +901,9 @@ publicRouter.get(
 // 1-Click IDM `.ef2` Export File (Internet Download Manager Native Multi-Connection Import)
 publicRouter.get(
   '/downloads/:id/idm-export',
+  requireRegisteredUser,
   asyncHandler(async (req, res) => {
-    const rawJob = await getDownloadJobRawRow(req.params.id);
+    const rawJob = await getDownloadJobRawRow(req.params.id, req.user.sub);
     const origin = `${req.protocol}://${req.get('host')}`;
     const targetUrl = rawJob.stream_url?.startsWith('/')
       ? `${origin}${rawJob.stream_url}`
@@ -878,8 +925,9 @@ publicRouter.get(
 // Direct Windows `IDMan.exe` Trigger Endpoint
 publicRouter.post(
   '/downloads/:id/open-in-idm',
+  requireRegisteredUser,
   asyncHandler(async (req, res) => {
-    const rawJob = await getDownloadJobRawRow(req.params.id);
+    const rawJob = await getDownloadJobRawRow(req.params.id, req.user.sub);
     const origin = `${req.protocol}://${req.get('host')}`;
     const targetUrl = rawJob.stream_url?.startsWith('/')
       ? `${origin}${rawJob.stream_url}`
@@ -962,6 +1010,9 @@ publicRouter.post(
     const shortCode = uuidv4().replace(/-/g, '').slice(0, 7);
     const streamUrl =
       req.body?.streamUrl || `/api/v1/stream/live-pipe?url=${encodeURIComponent(rawUrl)}`;
+    // Stored streamUrl is later played/redirected, so reject javascript:, data:,
+    // private-network and arbitrary external redirect targets before persisting.
+    assertSafeDownloadTarget(String(streamUrl));
 
     await sqlQuery(
       `INSERT INTO share_links (short_code, source_url, title, platform_id, thumbnail_url, duration_text, stream_url, views, created_at)

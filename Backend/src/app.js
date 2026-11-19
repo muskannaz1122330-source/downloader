@@ -10,12 +10,14 @@ import { trackBackendTxRxMiddleware } from './services/trafficEngine.js';
 import { publicRouter } from './routes/publicRoutes.js';
 import { adminRouter } from './routes/adminRoutes.js';
 import { seoSitemapRouter } from './routes/seoSitemapRoutes.js';
+import { fixtureRouter } from './routes/fixtureRoutes.js';
 import { AppError, sendError } from './utils/errors.js';
 import { logger } from './utils/logger.js';
 
 export function createBackendApp() {
   const app = express();
-  app.set('trust proxy', 1);
+  // Trust no proxy by default; operators behind nginx must set TRUST_PROXY_HOPS.
+  app.set('trust proxy', ENV.TRUST_PROXY_HOPS);
 
   // Measure real-time RX (Receive) & TX (Send) bandwidth + latency on every socket chunk!
   app.use(trackBackendTxRxMiddleware);
@@ -30,15 +32,14 @@ export function createBackendApp() {
   app.use(
     cors({
       origin: (origin, cb) => {
+        // No Origin header = same-origin / non-browser request.
         if (!origin) return cb(null, true);
-        if (
-          ENV.CORS_ORIGINS.includes(origin) ||
-          origin.endsWith('.e2b.app') ||
-          origin.includes('localhost')
-        ) {
-          return cb(null, true);
-        }
-        return cb(null, true);
+        const allowed = ENV.CORS_ORIGINS.includes(origin);
+        // Arena live previews are only permitted outside production.
+        const previewAllowed =
+          ENV.ALLOW_PREVIEW_ORIGINS && /^https:\/\/[\w-]+\.e2b\.app$/.test(origin);
+        if (allowed || previewAllowed) return cb(null, true);
+        return cb(new Error('ORIGIN_NOT_ALLOWED'));
       },
       credentials: true,
       exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length', 'Content-Disposition'],
@@ -75,6 +76,10 @@ export function createBackendApp() {
   });
   app.use('/api/v1', publicApiLimiter);
 
+  if (ENV.FIXTURE_MODE) {
+    app.use('/api/v1/__fixtures__', fixtureRouter);
+  }
+
   app.use('/', seoSitemapRouter);
   app.use('/api/v1', publicRouter);
   app.use('/api/v1/admin', adminRouter);
@@ -84,6 +89,12 @@ export function createBackendApp() {
   });
 
   app.use((err, req, res, _next) => {
+    if (err?.message === 'ORIGIN_NOT_ALLOWED') {
+      return sendError(
+        res,
+        new AppError(403, 'ORIGIN_NOT_ALLOWED', 'Cross-origin request from this origin is not allowed.')
+      );
+    }
     if (!err.statusCode || err.statusCode >= 500) {
       logger.error({ err, path: req.originalUrl }, 'Unhandled server error');
     }
